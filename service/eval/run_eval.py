@@ -42,6 +42,14 @@ from readforme.schema import CRITICAL_KINDS, FactKind  # noqa: E402
 
 
 # ------------------------------------------------------------------ metrics ---
+# Several labels are legitimately correct for one document (a tax notice is both a
+# government letter and a tax document). Scoring only the generator's label penalised
+# correct answers in the first real-model run.
+DOC_TYPE_ACCEPT = {
+    "government_letter": {"government_letter", "bank_or_tax", "legal_notice"},
+    "bill_or_invoice": {"bill_or_invoice"},
+    "prescription": {"prescription", "medical"},
+}
 def cer(ref: str, hyp: str) -> float:
     r, h = canon_text(ref), canon_text(hyp)
     if not r:
@@ -114,7 +122,7 @@ def score_sample(gt: dict, reading) -> dict:
     shown = int(any(a.due and not (tokens_for("deadline", a.due) & ptoks) for a in reading.actions))
     out["fabricated_deadline_shown"] = shown
     out["fabricated_deadline_raw"] = int(shown or reading.verification.dropped_actions_due > 0)
-    out["doc_type_ok"] = int(reading.document_type.value == gt["document_type"])
+        out["doc_type_ok"] = int(reading.document_type.value in DOC_TYPE_ACCEPT.get(gt["document_type"], {gt["document_type"]}))
     return out
 
 
@@ -180,13 +188,27 @@ def run(args):
         t0 = time.perf_counter()
         reading, timings = engine.read(img, target_language=args.lang)
         s = score_sample(gt, reading)
+
         s.update({"id": gt["id"], "language": gt["language"], "perturbation": gt["perturbation"],
-                  "document_type": gt["document_type"], "latency_s": time.perf_counter() - t0,
-                  "visual_tokens_est": timings.visual_tokens_est,
-                  "verifier_dropped_due": reading.verification.dropped_actions_due})
+          "document_type": gt["document_type"], "latency_s": time.perf_counter() - t0,
+          "visual_tokens_est": timings.visual_tokens_est,
+          "verifier_dropped_due": reading.verification.dropped_actions_due,
+          # what the model actually produced, for diagnosing each metric
+          "pred_document_type": reading.document_type.value,
+          "transcription": reading.transcription,
+          "pred_facts": [{"label": f.label, "value": f.value, "kind": f.kind.value,
+                          "verified": f.verified, "note": f.note} for f in reading.key_facts],
+          "pred_actions": [{"text": a.text, "due": a.due, "verified": a.verified} for a in reading.actions],
+          "gt_facts": gt["facts"],
+          "missed_gt_facts": [f for f in gt["facts"] if f["kind"] in {k.value for k in CRITICAL_KINDS}
+                              and not (tokens_for(f["kind"], f["value"]) &
+                                       set().union(*[tokens_for(k.kind.value, k.value) for k in reading.key_facts] or [set()]))],
+          "hallucinated": [f.value for f in reading.key_facts if f.kind in CRITICAL_KINDS
+                           and not (tokens_for(f.kind.value, f.value) & page_tokens(gt["page_text"]))]})
         rows.append(s)
         if args.verbose:
-            print(json.dumps(s, ensure_ascii=False))
+            brief = {k: v for k, v in s.items() if k not in ("transcription", "pred_facts", "pred_actions", "gt_facts")}
+            print(json.dumps(brief, ensure_ascii=False))
 
     report = aggregate(rows)
     report["config"] = vars(args)

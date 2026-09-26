@@ -1,0 +1,39 @@
+# Overlay for cohere-toolkit: adds the ReadForMe VLM service.
+#   docker compose -f docker-compose.yml -f docker-compose.readforme.yml up --build
+#
+# Option A (default below): the readforme container loads North-Micro-Vision itself
+#   via transformers. Needs an NVIDIA GPU with ~8 GB free (bf16) and the nvidia runtime.
+# Option B: point READFORME_BACKEND=openai at a vLLM server:
+#   vllm serve CohereLabs/North-Micro-Vision-Instruct --port 8001
+#   and set READFORME_VLM_URL=http://host.docker.internal:8001/v1
+services:
+  readforme:
+    build:
+      context: ../readforme/service          # adjust to where you cloned readforme
+    environment:
+      READFORME_BACKEND: ${READFORME_BACKEND:-transformers}
+      READFORME_VLM_URL: ${READFORME_VLM_URL:-http://host.docker.internal:8001/v1}
+      READFORME_MAX_PIXELS: ${READFORME_MAX_PIXELS:-3868706}
+      HF_HOME: /models
+    volumes:
+      - readforme_models:/models
+    ports:
+      - "8090:8090"
+    expose:
+      - "8090"
+    networks:
+      - proxynet
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  backend:
+    environment:
+      READFORME_URL: http://readforme:8090
+
+volumes:
+  readforme_models:

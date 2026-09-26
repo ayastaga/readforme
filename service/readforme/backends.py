@@ -36,7 +36,8 @@ class TransformersBackend:
     def __init__(self, model_id: str = DEFAULT_MODEL_ID, device_map: str = "auto", attn: str | None = None):
         import torch  # noqa: F401
         from transformers import AutoModelForImageTextToText, AutoProcessor
-
+        from transformers.utils import logging as hf_logging
+        hf_logging.set_verbosity_error()
         self.model_id = model_id
         self.processor = AutoProcessor.from_pretrained(model_id)
         kwargs = {"dtype": "auto", "device_map": device_map}

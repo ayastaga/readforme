@@ -35,3 +35,19 @@ def test_pixel_budget_applied():
     p = prepare(Image.new("RGB", (4000, 6000), "white"))
     w, h = p.image.size
     assert w * h <= MAX_PIXELS and w % 32 == 0 and h % 32 == 0
+
+
+def test_action_deadline_promoted_and_unreadable_dropped():
+    # Mirrors the first real-model run: deadline only on the action (translated month),
+    # plus a fact whose value is the transcription placeholder.
+    page = "Agence du revenu du Canada\nSolde dû : $132.25\nPayez au plus tard le 4 octobre 2026."
+    def extractor(img, t):
+        return {"document_type": "government_letter", "summary": "Avis.",
+                "key_facts": [{"label": "Amount", "value": "$132.25", "kind": "money"},
+                              {"label": "Ref", "value": "[unreadable] 4020 2026", "kind": "reference"}],
+                "actions": [{"text": "Pay the amount due", "due": "4 October 2026"}]}
+    reading, _ = ReadForMe(MockBackend(lambda img: page, extractor)).read(Image.new("RGB", (200, 300), "white"))
+    by_kind = {f.kind.value: f for f in reading.key_facts}
+    assert "reference" not in by_kind and any("could not be read" in w for w in reading.warnings)
+    assert by_kind["deadline"].value == "4 October 2026" and by_kind["deadline"].verified is True
+    assert reading.actions[0].due == "4 October 2026" and reading.actions[0].verified is True

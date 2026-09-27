@@ -123,6 +123,8 @@ def score_sample(gt: dict, reading) -> dict:
             if kf.verified is False:
                 flagged += 1
     out["hallucinated_facts"] = halluc
+    # hallucinated facts that PASSED verification: the transcription contained the same error
+    out["halluc_passed_verifier"] = halluc - flagged
     out["verifier_catch"] = flagged / halluc if halluc else None
     out["verifier_false_flag"] = false_flag / correct if correct else None
 
@@ -180,13 +182,21 @@ def oracle_backend(data_dir: Path, noise: float, hallucinate: float, seed: int) 
 def run(args):
     data = Path(args.data)
     gts = sorted(p for p in data.glob("*.json") if p.name != "manifest.json" and not p.name.startswith("results_"))
+    if args.lang_filter:
+        gts = [p for p in gts if f"_{args.lang_filter}_" in p.stem]
     if args.limit:
         gts = gts[: args.limit]
+    print(f"found {len(gts)} samples in {data.resolve()}"
+          + (f" (lang filter: {args.lang_filter})" if args.lang_filter else ""), flush=True)
+    if not gts:
+        sys.exit(f"No samples found in {data.resolve()}. Generate them first:\n"
+                 f"  python -m eval.synth.generate --out {args.data} --n 60")
     if args.backend == "mock":
         backend = oracle_backend(data, args.noise, args.hallucinate, args.seed)
     else:
         backend = make_backend(args.backend)
-    engine = ReadForMe(backend, max_pixels=args.max_pixels)
+    engine = ReadForMe(backend, max_pixels=args.max_pixels,
+                       extract_mode=args.extract_mode, transcribe_prompt=args.transcribe_prompt)
 
     rows = []
     for k, gp in enumerate(gts, 1):
@@ -221,7 +231,9 @@ def run(args):
 
     report = aggregate(rows)
     report["config"] = vars(args)
-    out = Path(args.out) if args.out else data / f"results_{args.backend}.json"
+    # one results file per configuration, so runs can be compared instead of overwriting each other
+    tag = f"{args.backend}_{args.extract_mode}_{args.transcribe_prompt}" + (f"_{args.lang_filter}" if args.lang_filter else "")
+    out = Path(args.out) if args.out else data / f"results_{tag}.json"
     out.write_text(json.dumps({"summary": report, "rows": rows}, ensure_ascii=False, indent=1))
     print_report(report)
     print(f"\nwrote {out}")
@@ -241,12 +253,15 @@ def aggregate(rows: list[dict]) -> dict:
         return {k: summarize(v) for k, v in sorted(g.items())}
 
     def summarize(rs):
+        if not rs:
+            return {"n": 0}
         return {
             "n": len(rs),
             "cer": mean(r["cer"] for r in rs),
             "fact_recall": mean(r["fact_recall"] for r in rs),
             "hallucinated_facts_per_doc": mean(r["hallucinated_facts"] for r in rs),
             "verifier_catch_rate": mean(r["verifier_catch"] for r in rs),
+            "halluc_shown_as_verified_per_doc": mean(r["halluc_passed_verifier"] for r in rs),
             "verifier_false_flag_rate": mean(r["verifier_false_flag"] for r in rs),
             "fabricated_deadline_rate_raw": mean(r["fabricated_deadline_raw"] for r in rs),
             "fabricated_deadline_rate_shown": mean(r["fabricated_deadline_shown"] for r in rs),
@@ -261,7 +276,7 @@ def aggregate(rows: list[dict]) -> dict:
 def print_report(rep: dict):
     def line(name, s):
         print(f"{name:<22} n={s['n']:<3} CER={s['cer']:.3f}  recall={s['fact_recall']:.3f}  "
-              f"halluc/doc={s['hallucinated_facts_per_doc']:.2f}  catch={s['verifier_catch_rate']}  "
+              f"halluc/doc={s['hallucinated_facts_per_doc']:.2f}  shown_verified/doc={s['halluc_shown_as_verified_per_doc']:.2f}  catch={s['verifier_catch_rate']}  "
               f"false_flag={s['verifier_false_flag_rate']}  fab_due raw/shown={s['fabricated_deadline_rate_raw']:.2f}/{s['fabricated_deadline_rate_shown']:.2f}  "
               f"p50={s['latency_s_p50']}s")
     print("== overall"); line("all", rep["overall"])
@@ -280,6 +295,10 @@ if __name__ == "__main__":
     p.add_argument("--limit", type=int, default=0)
     p.add_argument("--out", default=None)
     p.add_argument("--verbose", action="store_true")
+    p.add_argument("--extract-mode", default="grounded", choices=["grounded", "blind"],
+                   help="grounded: extraction sees the transcription; blind: two independent reads")
+    p.add_argument("--transcribe-prompt", default="v1", choices=["v1", "noescape", "script"])
+    p.add_argument("--lang-filter", default=None, help="only run samples of this page language, e.g. zh")
     # mock-only knobs
     p.add_argument("--oracle", action="store_true", help="mock: perfect model")
     p.add_argument("--noise", type=float, default=0.0, help="mock: OCR char-noise prob")
